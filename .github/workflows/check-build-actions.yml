@@ -1,6 +1,9 @@
 name: Geeqie check build
 run-name: ${{ github.actor }} is running Geeqie check build
-on: [push, pull_request]
+# on: [push, pull_request]
+on:
+  workflow_dispatch:  # Allows you to run the workflow manually from the Actions tab
+
 jobs:
   Check-Markdown:
     runs-on: ubuntu-24.04
