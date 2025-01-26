@@ -1,6 +1,6 @@
 name: Geeqie check compile FreeBSD
 run-name: ${{ github.actor }} is running Geeqie check compile FreeBSD
-on: [push, pull_request]
+#on: [push, pull_request]
 jobs:
   Check-Compile-FreeBSD:
     runs-on: ubuntu-latest
