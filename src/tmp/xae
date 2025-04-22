@@ -1,0 +1,306 @@
+		}
+	gtk_window_set_resizable(GTK_WINDOW(configwindow), TRUE);
+	gtk_container_set_border_width(GTK_CONTAINER(configwindow), PREF_PAD_BORDER);
+
+	win_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, PREF_PAD_SPACE);
+	gq_gtk_container_add(GTK_WIDGET(configwindow), win_vbox);
+	gtk_widget_show(win_vbox);
+
+	notebook = gtk_notebook_new();
+	gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_LEFT);
+	gtk_notebook_set_scrollable(GTK_NOTEBOOK(notebook), TRUE);
+	gq_gtk_box_pack_start(GTK_BOX(win_vbox), notebook, TRUE, TRUE, 0);
+
+	config_tab_general(notebook);
+	config_tab_image(notebook);
+	config_tab_osd(notebook);
+	config_tab_windows(notebook);
+	config_tab_accelerators(notebook);
+	config_tab_files(notebook);
+	config_tab_metadata(notebook);
+	config_tab_keywords(notebook);
+	config_tab_color(notebook);
+	config_tab_stereo(notebook);
+	config_tab_behavior(notebook);
+	config_tab_toolbar_main(notebook);
+	config_tab_toolbar_status(notebook);
+	config_tab_advanced(notebook);
+
+	gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), lw->options.preferences_window.page_number);
+
+	hbox = gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
+	gtk_button_box_set_layout(GTK_BUTTON_BOX(hbox), GTK_BUTTONBOX_END);
+	gtk_box_set_spacing(GTK_BOX(hbox), PREF_PAD_BUTTON_GAP);
+	gq_gtk_box_pack_end(GTK_BOX(win_vbox), hbox, FALSE, FALSE, 0);
+	gtk_widget_show(hbox);
+
+	button = pref_button_new(nullptr, GQ_ICON_HELP, _("Help"),
+				 G_CALLBACK(config_window_help_cb), notebook);
+	gq_gtk_container_add(GTK_WIDGET(hbox), button);
+	gtk_widget_set_can_default(button, TRUE);
+	gtk_widget_show(button);
+
+	button = pref_button_new(nullptr, GQ_ICON_OK, "OK",
+				 G_CALLBACK(config_window_ok_cb), notebook);
+	gq_gtk_container_add(GTK_WIDGET(hbox), button);
+	gtk_widget_set_can_default(button, TRUE);
+	gtk_widget_grab_default(button);
+	gtk_widget_show(button);
+
+	ct_button = button;
+
+	button = pref_button_new(nullptr, GQ_ICON_CANCEL, _("Cancel"),
+				 G_CALLBACK(config_window_close_cb), nullptr);
+	gq_gtk_container_add(GTK_WIDGET(hbox), button);
+	gtk_widget_set_can_default(button, TRUE);
+	gtk_widget_show(button);
+
+	if (!generic_dialog_get_alternative_button_order(configwindow))
+		{
+		gtk_box_reorder_child(GTK_BOX(hbox), ct_button, -1);
+		}
+
+	gtk_widget_show(notebook);
+
+	gtk_widget_show(configwindow);
+}
+
+/*
+ *-----------------------------------------------------------------------------
+ * config window show (public)
+ *-----------------------------------------------------------------------------
+ */
+
+void show_config_window(LayoutWindow *lw)
+{
+	if (configwindow)
+		{
+		gtk_window_present(GTK_WINDOW(configwindow));
+		return;
+		}
+
+	config_window_create(lw);
+}
+
+/*
+ *-----------------
+ * about window
+ *-----------------
+ */
+
+void show_about_window(LayoutWindow *lw)
+{
+	GDataInputStream *data_stream;
+	GInputStream *in_stream_authors;
+	GInputStream *in_stream_translators;
+	ZoneDetect *cd;
+	gchar *author_line;
+	gchar *authors[1000];
+	gint i_authors = 0;
+	gint n = 0;
+	gsize bytes_read;
+	gsize length;
+	gsize size;
+	guint32 flags;
+
+	g_autoptr(GString) copyright = g_string_new(_("This program comes with absolutely no warranty.\nGNU General Public License, version 2 or later.\nSee https://www.gnu.org/licenses/old-licenses/gpl-2.0.html\n\n"));
+
+	g_autofree gchar *timezone_path = g_build_filename(get_rc_dir(), TIMEZONE_DATABASE_FILE, NULL);
+	if (g_file_test(timezone_path, G_FILE_TEST_EXISTS))
+		{
+		cd = ZDOpenDatabase(timezone_path);
+		if (cd)
+			{
+			copyright = g_string_append(copyright, ZDGetNotice(cd));
+			}
+		else
+			{
+			log_printf("Error: Init of timezone database %s failed\n", timezone_path);
+			}
+		ZDCloseDatabase(cd);
+		}
+
+	copyright = g_string_append(copyright, _("\n\nSome icons by https://www.flaticon.com"));
+
+	in_stream_authors = g_resources_open_stream(GQ_RESOURCE_PATH_CREDITS "/authors", G_RESOURCE_LOOKUP_FLAGS_NONE, nullptr);
+
+	data_stream = g_data_input_stream_new(in_stream_authors);
+
+	authors[0] = nullptr;
+	while ((author_line = g_data_input_stream_read_line(G_DATA_INPUT_STREAM(data_stream), &length, nullptr, nullptr)))
+		{
+		authors[i_authors] = author_line;
+		i_authors++;
+		}
+	authors[i_authors] = nullptr;
+
+	g_input_stream_close(in_stream_authors, nullptr, nullptr);
+
+	constexpr auto translators_path = GQ_RESOURCE_PATH_CREDITS "/translators";
+
+	g_resources_get_info(translators_path, G_RESOURCE_LOOKUP_FLAGS_NONE, &size, &flags, nullptr);
+
+	in_stream_translators = g_resources_open_stream(translators_path, G_RESOURCE_LOOKUP_FLAGS_NONE, nullptr);
+	g_autofree auto *translators = static_cast<gchar *>(g_malloc0(size));
+	g_input_stream_read_all(in_stream_translators, translators, size, &bytes_read, nullptr, nullptr);
+	g_input_stream_close(in_stream_translators, nullptr, nullptr);
+
+	g_autofree gchar *comment = g_strconcat(_("Project created by John Ellis\nGQview 1998\nGeeqie 2007\n\n\nDevelopment and bug reports:\n"),
+	                                        GQ_EMAIL_ADDRESS, _("\nhttps://github.com/BestImageViewer/geeqie/issues"), NULL);
+
+	const gchar *artists[2] = {
+	    "Néstor Díaz Valencia <nestor@estudionexos.com>",
+	    nullptr,
+	};
+
+	gtk_show_about_dialog(GTK_WINDOW(lw->window),
+	                      "title", _("About Geeqie"),
+	                      "resizable", TRUE,
+	                      "program-name", GQ_APPNAME,
+	                      "version", VERSION,
+	                      "logo-icon-name", PIXBUF_INLINE_LOGO,
+	                      "icon-name", PIXBUF_INLINE_ICON,
+	                      "website", GQ_WEBSITE,
+	                      "website-label", _("Website"),
+	                      "comments", comment,
+	                      "artists", artists,
+	                      "authors", authors,
+	                      "translator-credits", translators,
+	                      "wrap-license", TRUE,
+	                      "license", copyright->str,
+	                      NULL);
+
+	while(n < i_authors)
+		{
+		g_free(authors[n]);
+		n++;
+		}
+
+	g_object_unref(data_stream);
+	g_object_unref(in_stream_authors);
+	g_object_unref(in_stream_translators);
+}
+
+static void image_overlay_set_text_colors()
+{
+	c_options->image_overlay.text_red = options->image_overlay.text_red;
+	c_options->image_overlay.text_green = options->image_overlay.text_green;
+	c_options->image_overlay.text_blue = options->image_overlay.text_blue;
+	c_options->image_overlay.text_alpha = options->image_overlay.text_alpha;
+	c_options->image_overlay.background_red = options->image_overlay.background_red;
+	c_options->image_overlay.background_green = options->image_overlay.background_green;
+	c_options->image_overlay.background_blue = options->image_overlay.background_blue;
+	c_options->image_overlay.background_alpha = options->image_overlay.background_alpha;
+}
+
+/*
+ *-----------------------------------------------------------------------------
+ * timezone database routines
+ *-----------------------------------------------------------------------------
+ */
+
+static void timezone_async_ready_cb(GObject *source_object, GAsyncResult *res, gpointer data)
+{
+	auto tz = static_cast<TZData *>(data);
+	FileData *fd;
+
+	if (!g_cancellable_is_cancelled(tz->cancellable))
+		{
+		generic_dialog_close(tz->gd);
+		}
+
+	g_autoptr(GError) error = nullptr;
+	if (g_file_copy_finish(G_FILE(source_object), res, &error))
+		{
+		g_autofree gchar *tmp_filename = g_file_get_path(tz->tmp_g_file);
+		fd = file_data_new_simple(tmp_filename);
+
+		g_autofree gchar *tmp_dir = open_archive(fd);
+		if (tmp_dir)
+			{
+			g_autofree gchar *timezone_bin = g_build_filename(tmp_dir, TIMEZONE_DATABASE_VERSION, TIMEZONE_DATABASE_FILE, NULL);
+			if (isfile(timezone_bin))
+				{
+				move_file(timezone_bin, tz->timezone_database_user);
+				}
+			else
+				{
+				warning_dialog(_("Warning: Cannot open timezone database file"), _("See the Log Window"), GQ_ICON_DIALOG_WARNING, nullptr);
+				}
+
+			// The folder in /tmp is deleted in exit_program_final()
+			}
+		else
+			{
+			warning_dialog(_("Warning: Cannot open timezone database file"), _("See the Log Window"), GQ_ICON_DIALOG_WARNING, nullptr);
+			}
+		file_data_unref(fd);
+		}
+	else
+		{
+		file_util_warning_dialog(_("Error: Timezone database download failed"), error->message, GQ_ICON_DIALOG_ERROR, nullptr);
+		}
+
+	g_file_delete(tz->tmp_g_file, nullptr, nullptr);
+	g_object_unref(tz->tmp_g_file);
+	tz->tmp_g_file = nullptr;
+	g_object_unref(tz->cancellable);
+	g_object_unref(tz->timezone_database_gq);
+}
+
+static void timezone_progress_cb(goffset current_num_bytes, goffset total_num_bytes, gpointer data)
+{
+	auto tz = static_cast<TZData *>(data);
+
+	if (!g_cancellable_is_cancelled(tz->cancellable))
+		{
+		gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(tz->progress), static_cast<gdouble>(current_num_bytes) / total_num_bytes);
+		}
+}
+
+static void timezone_cancel_button_cb(GenericDialog *, gpointer data)
+{
+	auto tz = static_cast<TZData *>(data);
+
+	g_cancellable_cancel(tz->cancellable);
+}
+
+static void timezone_database_install_cb(GtkWidget *widget, gpointer data)
+{
+	auto tz = static_cast<TZData *>(data);
+	GFileIOStream *io_stream;
+
+	if (tz->tmp_g_file)
+		{
+		return;
+		}
+
+	g_autoptr(GError) error = nullptr;
+	tz->tmp_g_file = g_file_new_tmp("geeqie_timezone_XXXXXX", &io_stream, &error);
+
+	if (error)
+		{
+		file_util_warning_dialog(_("Timezone database download failed"), error->message, GQ_ICON_DIALOG_ERROR, nullptr);
+		log_printf("Error: Download timezone database failed:\n%s", error->message);
+		g_object_unref(tz->tmp_g_file);
+		}
+	else
+		{
+		tz->timezone_database_gq = g_file_new_for_uri(TIMEZONE_DATABASE_WEB);
+
+		tz->gd = generic_dialog_new(_("Timezone database"), "download_timezone_database", nullptr, TRUE, timezone_cancel_button_cb, tz);
+
+		generic_dialog_add_message(tz->gd, GQ_ICON_DIALOG_INFO, _("Downloading timezone database"), nullptr, FALSE);
+
+		tz->progress = gtk_progress_bar_new();
+		gq_gtk_box_pack_start(GTK_BOX(tz->gd->vbox), tz->progress, FALSE, FALSE, 0);
+		gtk_widget_show(tz->progress);
+
+		gtk_widget_show(tz->gd->dialog);
+		tz->cancellable = g_cancellable_new();
+		g_file_copy_async(tz->timezone_database_gq, tz->tmp_g_file, G_FILE_COPY_OVERWRITE, G_PRIORITY_LOW, tz->cancellable, timezone_progress_cb, tz, timezone_async_ready_cb, tz);
+
+		gtk_button_set_label(GTK_BUTTON(widget), _("Update"));
+		}
+}
+/* vim: set shiftwidth=8 softtabstop=0 cindent cinoptions={1s: */

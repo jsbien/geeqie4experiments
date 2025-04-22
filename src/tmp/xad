@@ -1,0 +1,1000 @@
+	list_d = filelist_filter(list_d, TRUE);
+
+	kfd->list = g_list_concat(list_f, kfd->list);
+	kfd->list_dir = g_list_concat(list_d, kfd->list_dir);
+}
+
+static void keywords_find_reset(KeywordFindData *kfd)
+{
+	filelist_free(kfd->list);
+	kfd->list = nullptr;
+
+	filelist_free(kfd->list_dir);
+	kfd->list_dir = nullptr;
+}
+
+static void keywords_find_close_cb(GenericDialog *, gpointer data)
+{
+	auto kfd = static_cast<KeywordFindData *>(data);
+
+	if (!gtk_widget_get_sensitive(kfd->button_close)) return;
+
+	keywords_find_reset(kfd);
+	generic_dialog_close(kfd->gd);
+	g_free(kfd);
+}
+
+static void keywords_find_finish(KeywordFindData *kfd)
+{
+	keywords_find_reset(kfd);
+
+	gq_gtk_entry_set_text(GTK_ENTRY(kfd->progress), _("done"));
+	gtk_spinner_stop(GTK_SPINNER(kfd->spinner));
+
+	gtk_widget_set_sensitive(kfd->group, TRUE);
+	gtk_widget_set_sensitive(kfd->button_start, TRUE);
+	gtk_widget_set_sensitive(kfd->button_stop, FALSE);
+	gtk_widget_set_sensitive(kfd->button_close, TRUE);
+}
+
+static void keywords_find_stop_cb(GenericDialog *, gpointer data)
+{
+	auto kfd = static_cast<KeywordFindData *>(data);
+
+	g_idle_remove_by_data(kfd);
+
+	keywords_find_finish(kfd);
+}
+
+static gboolean keywords_find_file(gpointer data)
+{
+	auto kfd = static_cast<KeywordFindData *>(data);
+	GtkTextIter iter;
+	GtkTextBuffer *buffer;
+	GList *keywords;
+
+	if (kfd->list)
+		{
+		FileData *fd;
+
+		fd = static_cast<FileData *>(kfd->list->data);
+		kfd->list = g_list_remove(kfd->list, fd);
+
+		keywords = metadata_read_list(fd, KEYWORD_KEY, METADATA_PLAIN);
+		buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(keyword_text));
+
+		while (keywords)
+			{
+			gtk_text_buffer_get_end_iter(buffer, &iter);
+			g_autofree gchar *tmp = g_strconcat(static_cast<const gchar *>(keywords->data), "\n", NULL);
+			gtk_text_buffer_insert(buffer, &iter, tmp, -1);
+			keywords = keywords->next;
+			}
+
+		gq_gtk_entry_set_text(GTK_ENTRY(kfd->progress), fd->path);
+		file_data_unref(fd);
+		g_list_free_full(keywords, g_free);
+
+		return (G_SOURCE_CONTINUE);
+		}
+
+	if (kfd->list_dir)
+		{
+		FileData *fd;
+
+		fd = static_cast<FileData *>(kfd->list_dir->data);
+		kfd->list_dir = g_list_remove(kfd->list_dir, fd);
+
+		keywords_find_folder(kfd, fd);
+
+		file_data_unref(fd);
+
+		return G_SOURCE_CONTINUE;
+		}
+
+	keywords_find_finish(kfd);
+
+	return G_SOURCE_REMOVE;
+}
+
+static void keywords_find_start_cb(GenericDialog *, gpointer data)
+{
+	auto kfd = static_cast<KeywordFindData *>(data);
+
+	if (kfd->list || !gtk_widget_get_sensitive(kfd->button_start)) return;
+
+	g_autofree gchar *path = remove_trailing_slash((gq_gtk_entry_get_text(GTK_ENTRY(kfd->entry))));
+	parse_out_relatives(path);
+
+	if (!isdir(path))
+		{
+		warning_dialog(_("Invalid folder"),
+				_("The specified folder can not be found."),
+				GQ_ICON_DIALOG_WARNING, kfd->gd->dialog);
+		}
+	else
+		{
+		FileData *dir_fd;
+
+		gtk_widget_set_sensitive(kfd->group, FALSE);
+		gtk_widget_set_sensitive(kfd->button_start, FALSE);
+		gtk_widget_set_sensitive(kfd->button_stop, TRUE);
+		gtk_widget_set_sensitive(kfd->button_close, FALSE);
+		gtk_spinner_start(GTK_SPINNER(kfd->spinner));
+
+		dir_fd = file_data_new_dir(path);
+		keywords_find_folder(kfd, dir_fd);
+		file_data_unref(dir_fd);
+		kfd->idle_id = g_idle_add(keywords_find_file, kfd);
+		}
+}
+
+static void keywords_find_dialog(GtkWidget *widget, const gchar *path)
+{
+	KeywordFindData *kfd;
+	GtkWidget *hbox;
+	GtkWidget *label;
+
+	kfd = g_new0(KeywordFindData, 1);
+
+	kfd->gd = generic_dialog_new(_("Search for keywords"),
+									"search_for_keywords",
+									widget, FALSE,
+									nullptr, kfd);
+	gtk_window_set_default_size(GTK_WINDOW(kfd->gd->dialog), KEYWORD_DIALOG_WIDTH, -1);
+	kfd->gd->cancel_cb = keywords_find_close_cb;
+	kfd->button_close = generic_dialog_add_button(kfd->gd, GQ_ICON_CLOSE, _("Close"),
+						     keywords_find_close_cb, FALSE);
+	kfd->button_start = generic_dialog_add_button(kfd->gd, GQ_ICON_OK, _("S_tart"),
+						     keywords_find_start_cb, FALSE);
+	kfd->button_stop = generic_dialog_add_button(kfd->gd, GQ_ICON_STOP, _("Stop"),
+						    keywords_find_stop_cb, FALSE);
+	gtk_widget_set_sensitive(kfd->button_stop, FALSE);
+
+	generic_dialog_add_message(kfd->gd, nullptr, _("Search for keywords"), nullptr, FALSE);
+
+	hbox = pref_box_new(kfd->gd->vbox, FALSE, GTK_ORIENTATION_HORIZONTAL, 0);
+	pref_spacer(hbox, PREF_PAD_INDENT);
+	kfd->group = pref_box_new(hbox, TRUE, GTK_ORIENTATION_VERTICAL, PREF_PAD_GAP);
+
+	hbox = pref_box_new(kfd->group, FALSE, GTK_ORIENTATION_HORIZONTAL, PREF_PAD_SPACE);
+	pref_label_new(hbox, _("Folder:"));
+
+	label = tab_completion_new(&kfd->entry, path, nullptr, nullptr, nullptr, nullptr);
+	tab_completion_add_select_button(kfd->entry,_("Select folder") , TRUE);
+	gq_gtk_box_pack_start(GTK_BOX(hbox), label, TRUE, TRUE, 0);
+	gtk_widget_show(label);
+
+	pref_checkbox_new_int(kfd->group, _("Include subfolders"), FALSE, &kfd->recurse);
+
+	pref_line(kfd->gd->vbox, PREF_PAD_SPACE);
+	hbox = pref_box_new(kfd->gd->vbox, FALSE, GTK_ORIENTATION_HORIZONTAL, PREF_PAD_SPACE);
+
+	kfd->progress = gtk_entry_new();
+	gtk_widget_set_can_focus(kfd->progress, FALSE);
+	gtk_editable_set_editable(GTK_EDITABLE(kfd->progress), FALSE);
+	gq_gtk_entry_set_text(GTK_ENTRY(kfd->progress), _("click start to begin"));
+	gq_gtk_box_pack_start(GTK_BOX(hbox), kfd->progress, TRUE, TRUE, 0);
+	gtk_widget_show(kfd->progress);
+
+	kfd->spinner = gtk_spinner_new();
+	gq_gtk_box_pack_start(GTK_BOX(hbox), kfd->spinner, FALSE, FALSE, 0);
+	gtk_widget_show(kfd->spinner);
+
+	kfd->list = nullptr;
+
+	gtk_widget_show(kfd->gd->dialog);
+}
+
+static void keywords_find_cb(GtkWidget *widget, gpointer)
+{
+	const gchar *path = layout_get_path(nullptr);
+
+	if (!path || !*path) path = homedir();
+	keywords_find_dialog(widget, path);
+}
+
+static void config_tab_keywords_save()
+{
+	GtkTextIter start;
+	GtkTextIter end;
+	GtkTextBuffer *buffer;
+	GList *kw_list = nullptr;
+	gchar *kw_split;
+
+	buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(keyword_text));
+	gtk_text_buffer_get_bounds(buffer, &start, &end);
+
+	g_autofree gchar *buffer_text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+
+	kw_split = strtok(buffer_text, "\n");
+	while (kw_split != nullptr)
+		{
+		if (!g_list_find_custom(kw_list, kw_split, reinterpret_cast<GCompareFunc>(g_strcmp0)))
+			{
+			kw_list = g_list_append(kw_list, g_strdup(kw_split));
+			}
+		kw_split = strtok(nullptr, "\n");
+		}
+
+	keyword_list_set(kw_list);
+
+	g_list_free_full(kw_list, g_free);
+}
+
+static void config_tab_keywords(GtkWidget *notebook)
+{
+	GtkWidget *hbox;
+	GtkWidget *vbox;
+	GtkWidget *group;
+	GtkWidget *button;
+	GtkWidget *scrolled;
+	GtkTextIter iter;
+	GtkTextBuffer *buffer;
+#if HAVE_SPELL
+	GspellTextView *gspell_view;
+#endif
+
+	vbox = scrolled_notebook_page(notebook, _("Keywords"));
+
+	group = pref_group_new(vbox, TRUE, _("Edit keywords autocompletion list"), GTK_ORIENTATION_VERTICAL);
+
+	hbox = pref_box_new(group, FALSE, GTK_ORIENTATION_HORIZONTAL, PREF_PAD_BUTTON_GAP);
+
+	button = pref_button_new(hbox, GQ_ICON_RUN, _("Search"),
+				   G_CALLBACK(keywords_find_cb), keyword_text);
+	gtk_widget_set_tooltip_text(button, _("Search for existing keywords"));
+
+
+	keyword_text = gtk_text_view_new();
+	gtk_widget_set_size_request(keyword_text, 20, 20);
+	scrolled = gq_gtk_scrolled_window_new(nullptr, nullptr);
+	gq_gtk_box_pack_start(GTK_BOX(group), scrolled, TRUE, TRUE, 0);
+	gtk_widget_show(scrolled);
+
+#if HAVE_SPELL
+	if (options->metadata.check_spelling)
+		{
+		gspell_view = gspell_text_view_get_from_gtk_text_view(GTK_TEXT_VIEW(keyword_text));
+		gspell_text_view_basic_setup(gspell_view);
+		}
+#endif
+
+	gq_gtk_container_add(GTK_WIDGET(scrolled), keyword_text);
+	gtk_widget_show(keyword_text);
+
+	gtk_text_view_set_editable(GTK_TEXT_VIEW(keyword_text), TRUE);
+
+	buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(keyword_text));
+	gtk_text_buffer_create_tag(buffer, "monospace",
+				"family", "monospace", NULL);
+
+	gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(keyword_text), GTK_WRAP_WORD);
+	gtk_text_buffer_get_start_iter(buffer, &iter);
+	gtk_text_buffer_create_mark(buffer, "end", &iter, FALSE);
+
+	g_autofree gchar *path = g_build_filename(get_rc_dir(), "keywords", NULL);
+
+	GList *kwl = keyword_list_get();
+	kwl = g_list_first(kwl);
+	while (kwl)
+	{
+		gtk_text_buffer_get_end_iter (buffer, &iter);
+		g_autofree gchar *tmp = g_strconcat(static_cast<const gchar *>(kwl->data), "\n", NULL);
+		gtk_text_buffer_insert(buffer, &iter, tmp, -1);
+		kwl = kwl->next;
+	}
+
+	gtk_text_buffer_set_modified(buffer, FALSE);
+}
+
+/* metadata tab */
+#if HAVE_LCMS
+static void intent_menu_cb(GtkWidget *combo, gpointer data)
+{
+	auto option = static_cast<gint *>(data);
+
+	switch (gtk_combo_box_get_active(GTK_COMBO_BOX(combo)))
+		{
+		case 0:
+		default:
+			*option = INTENT_PERCEPTUAL;
+			break;
+		case 1:
+			*option = INTENT_RELATIVE_COLORIMETRIC;
+			break;
+		case 2:
+			*option = INTENT_SATURATION;
+			break;
+		case 3:
+			*option = INTENT_ABSOLUTE_COLORIMETRIC;
+			break;
+		}
+}
+
+static void add_intent_menu(GtkWidget *table, gint column, gint row, const gchar *text,
+			     gint option, gint *option_c)
+{
+	GtkWidget *combo;
+	gint current = 0;
+
+	*option_c = option;
+
+	pref_table_label(table, column, row, text, GTK_ALIGN_START);
+
+	combo = gtk_combo_box_text_new();
+
+	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), _("Perceptual"));
+	if (option == INTENT_PERCEPTUAL) current = 0;
+	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), _("Relative Colorimetric"));
+	if (option == INTENT_RELATIVE_COLORIMETRIC) current = 1;
+	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), _("Saturation"));
+	if (option == INTENT_SATURATION) current = 2;
+	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), _("Absolute Colorimetric"));
+	if (option == INTENT_ABSOLUTE_COLORIMETRIC) current = 3;
+
+	gtk_combo_box_set_active(GTK_COMBO_BOX(combo), current);
+
+	gtk_widget_set_tooltip_text(combo,_("Refer to the lcms documentation for the defaults used when the selected Intent is not available"));
+
+	g_signal_connect(G_OBJECT(combo), "changed",
+			 G_CALLBACK(intent_menu_cb), option_c);
+
+	gq_gtk_grid_attach(GTK_GRID(table), combo, column + 1, column + 2, row, row + 1, GTK_SHRINK, static_cast<GtkAttachOptions>(0), 0, 0);
+	gtk_widget_show(combo);
+}
+#endif
+
+static void config_tab_color(GtkWidget *notebook)
+{
+	GtkWidget *label;
+	GtkWidget *vbox;
+	GtkWidget *group;
+	GtkWidget *tabcomp;
+	GtkWidget *table;
+
+	vbox = scrolled_notebook_page(notebook, _("Color management"));
+
+	group =  pref_group_new(vbox, FALSE, _("Input profiles"), GTK_ORIENTATION_VERTICAL);
+#if !HAVE_LCMS
+	gtk_widget_set_sensitive(pref_group_parent(group), FALSE);
+#endif
+
+	table = pref_table_new(group, 3, COLOR_PROFILE_INPUTS + 1, FALSE, FALSE);
+	gtk_grid_set_column_spacing(GTK_GRID(table), PREF_PAD_GAP);
+
+	label = pref_table_label(table, 0, 0, _("Type"), GTK_ALIGN_START);
+	pref_label_bold(label, TRUE, FALSE);
+
+	label = pref_table_label(table, 1, 0, _("Menu name"), GTK_ALIGN_START);
+	pref_label_bold(label, TRUE, FALSE);
+
+	label = pref_table_label(table, 2, 0, _("File"), GTK_ALIGN_START);
+	pref_label_bold(label, TRUE, FALSE);
+
+	for (gint i = 0; i < COLOR_PROFILE_INPUTS; i++)
+		{
+		GtkWidget *entry;
+
+		g_autofree gchar *buf = g_strdup_printf(_("Input %d:"), i + COLOR_PROFILE_FILE);
+		pref_table_label(table, 0, i + 1, buf, GTK_ALIGN_END);
+
+		entry = gtk_entry_new();
+		gtk_entry_set_max_length(GTK_ENTRY(entry), EDITOR_NAME_MAX_LENGTH);
+		if (options->color_profile.input_name[i])
+			{
+			gq_gtk_entry_set_text(GTK_ENTRY(entry), options->color_profile.input_name[i]);
+			}
+		gq_gtk_grid_attach(GTK_GRID(table), entry, 1, 2, i + 1, i + 2, static_cast<GtkAttachOptions>(GTK_FILL | GTK_EXPAND), static_cast<GtkAttachOptions>(0), 0, 0);
+		gtk_widget_show(entry);
+		color_profile_input_name_entry[i] = entry;
+
+		tabcomp = tab_completion_new(&entry, options->color_profile.input_file[i], nullptr, ".icc", "ICC Files", nullptr);
+		tab_completion_add_select_button(entry, _("Select color profile"), FALSE);
+		gtk_widget_set_size_request(entry, 160, -1);
+		gq_gtk_grid_attach(GTK_GRID(table), tabcomp, 2, 3, i + 1, i + 2, static_cast<GtkAttachOptions>(GTK_FILL | GTK_EXPAND), static_cast<GtkAttachOptions>(0), 0, 0);
+		gtk_widget_show(tabcomp);
+		color_profile_input_file_entry[i] = entry;
+		}
+
+	group =  pref_group_new(vbox, FALSE, _("Screen profile"), GTK_ORIENTATION_VERTICAL);
+#if !HAVE_LCMS
+	gtk_widget_set_sensitive(pref_group_parent(group), FALSE);
+#endif
+	pref_checkbox_new_int(group, _("Use system screen profile if available"),
+			      options->color_profile.use_x11_screen_profile, &c_options->color_profile.use_x11_screen_profile);
+
+	table = pref_table_new(group, 2, 1, FALSE, FALSE);
+
+	pref_table_label(table, 0, 0, _("Screen:"), GTK_ALIGN_END);
+	tabcomp = tab_completion_new(&color_profile_screen_file_entry,
+				     options->color_profile.screen_file, nullptr, ".icc", "ICC Files", nullptr);
+	tab_completion_add_select_button(color_profile_screen_file_entry, _("Select color profile"), FALSE);
+	gtk_widget_set_size_request(color_profile_screen_file_entry, 160, -1);
+#if HAVE_LCMS
+	add_intent_menu(table, 0, 1, _("Render Intent:"), options->color_profile.render_intent, &c_options->color_profile.render_intent);
+#endif
+	gq_gtk_grid_attach(GTK_GRID(table), tabcomp, 1, 2, 0, 1, static_cast<GtkAttachOptions>(GTK_FILL | GTK_EXPAND), static_cast<GtkAttachOptions>(0), 0, 0);
+
+	gtk_widget_show(tabcomp);
+}
+
+/* advanced entry tab */
+static void use_geeqie_trash_cb(GtkWidget *widget, gpointer)
+{
+	if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)))
+		{
+		c_options->file_ops.use_system_trash = FALSE;
+		c_options->file_ops.no_trash = FALSE;
+		}
+}
+
+static void use_system_trash_cb(GtkWidget *widget, gpointer)
+{
+	if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)))
+		{
+		c_options->file_ops.use_system_trash = TRUE;
+		c_options->file_ops.no_trash = FALSE;
+		}
+}
+
+static void use_no_cache_cb(GtkWidget *widget, gpointer)
+{
+	if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)))
+		{
+		c_options->file_ops.no_trash = TRUE;
+		}
+}
+
+static void config_tab_behavior(GtkWidget *notebook)
+{
+	GtkWidget *hbox;
+	GtkWidget *vbox;
+	GtkWidget *group;
+	GtkWidget *button;
+	GtkWidget *tabcomp;
+	GtkWidget *ct_button;
+	GtkWidget *spin;
+	GtkWidget *table;
+	GtkWidget *marks;
+	GtkWidget *with_rename;
+	GtkWidget *collections_on_top;
+	GtkWidget *hide_window_in_fullscreen;
+	GtkWidget *hide_osd_in_fullscreen;
+	GtkWidget *checkbox;
+	GtkWidget *tmp;
+
+	vbox = scrolled_notebook_page(notebook, _("Behavior"));
+
+	group = pref_group_new(vbox, FALSE, _("Delete"), GTK_ORIENTATION_VERTICAL);
+
+	pref_checkbox_new_int(group, _("Confirm permanent file delete"),
+			      options->file_ops.confirm_delete, &c_options->file_ops.confirm_delete);
+	pref_checkbox_new_int(group, _("Confirm move file to Trash"),
+			      options->file_ops.confirm_move_to_trash, &c_options->file_ops.confirm_move_to_trash);
+	pref_checkbox_new_int(group, _("Enable Delete key"),
+			      options->file_ops.enable_delete_key, &c_options->file_ops.enable_delete_key);
+
+	ct_button = pref_radiobutton_new(group, nullptr, _("Use Geeqie trash location"),
+					!options->file_ops.use_system_trash && !options->file_ops.no_trash, G_CALLBACK(use_geeqie_trash_cb),nullptr);
+
+	hbox = pref_box_new(group, FALSE, GTK_ORIENTATION_HORIZONTAL, PREF_PAD_SPACE);
+	pref_checkbox_link_sensitivity(ct_button, hbox);
+
+	pref_spacer(hbox, PREF_PAD_INDENT - PREF_PAD_SPACE);
+	pref_label_new(hbox, _("Folder:"));
+
+	tabcomp = tab_completion_new(&safe_delete_path_entry, options->file_ops.safe_delete_path, nullptr, nullptr, nullptr, nullptr);
+	tab_completion_add_select_button(safe_delete_path_entry, nullptr, TRUE);
+	gq_gtk_box_pack_start(GTK_BOX(hbox), tabcomp, TRUE, TRUE, 0);
+	gtk_widget_show(tabcomp);
+
+	hbox = pref_box_new(group, FALSE, GTK_ORIENTATION_HORIZONTAL, PREF_PAD_BUTTON_GAP);
+	pref_checkbox_link_sensitivity(ct_button, hbox);
+
+	pref_spacer(hbox, PREF_PAD_INDENT - PREF_PAD_GAP);
+	spin = pref_spin_new_int(hbox, _("Maximum size:"), _("MiB"),
+				 0, 2048, 1, options->file_ops.safe_delete_folder_maxsize, &c_options->file_ops.safe_delete_folder_maxsize);
+	gtk_widget_set_tooltip_markup(spin, _("Set to 0 for unlimited size"));
+	button = pref_button_new(nullptr, nullptr, _("View"),
+				 G_CALLBACK(safe_delete_view_cb), nullptr);
+	gq_gtk_box_pack_end(GTK_BOX(hbox), button, FALSE, FALSE, 0);
+	gtk_widget_show(button);
+
+	button = pref_button_new(nullptr, GQ_ICON_CLEAR, nullptr,
+				 G_CALLBACK(safe_delete_clear_cb), nullptr);
+	gq_gtk_box_pack_end(GTK_BOX(hbox), button, FALSE, FALSE, 0);
+
+	c_options->file_ops.no_trash = options->file_ops.no_trash;
+	c_options->file_ops.use_system_trash = options->file_ops.use_system_trash;
+
+	pref_radiobutton_new(group, ct_button, _("Use system Trash bin"),
+					options->file_ops.use_system_trash && !options->file_ops.no_trash, G_CALLBACK(use_system_trash_cb), nullptr);
+
+	pref_radiobutton_new(group, ct_button, _("Use no trash at all"),
+			options->file_ops.no_trash, G_CALLBACK(use_no_cache_cb), nullptr);
+
+	gtk_widget_show(button);
+
+	pref_spacer(group, PREF_PAD_GROUP);
+
+
+	group = pref_group_new(vbox, FALSE, _("Behavior"), GTK_ORIENTATION_VERTICAL);
+
+	pref_checkbox_new_int(group, _("Descend folders in tree view"),
+			      options->tree_descend_subdirs, &c_options->tree_descend_subdirs);
+
+	pref_checkbox_new_int(group, _("In place renaming"),
+			      options->file_ops.enable_in_place_rename, &c_options->file_ops.enable_in_place_rename);
+
+	pref_checkbox_new_int(group, _("List directory view uses single click to enter"),
+			      options->view_dir_list_single_click_enter, &c_options->view_dir_list_single_click_enter);
+
+	tmp = pref_checkbox_new_int(group, _("Circular selection lists"),
+			      options->circular_selection_lists, &c_options->circular_selection_lists);
+	gtk_widget_set_tooltip_text(tmp, _("Traverse selection lists in a circular manner"));
+
+	marks = pref_checkbox_new_int(group, _("Save marks on exit"),
+				options->marks_save, &c_options->marks_save);
+	gtk_widget_set_tooltip_text(marks,_("Note that marks linked to a keyword will be saved irrespective of this setting"));
+
+	with_rename = pref_checkbox_new_int(group, _("Use 'With Rename' as default for Copy/Move dialogs"),
+				options->with_rename, &c_options->with_rename);
+	gtk_widget_set_tooltip_text(with_rename,_("Change the default button for Copy/Move dialogs"));
+
+	collections_on_top = pref_checkbox_new_int(group, _("Permit duplicates in Collections"),
+				options->collections_duplicates, &c_options->collections_duplicates);
+	gtk_widget_set_tooltip_text(collections_on_top, _("Allow the same image to be in a Collection more than once"));
+
+	collections_on_top = pref_checkbox_new_int(group, _("Open collections on top"),
+				options->collections_on_top, &c_options->collections_on_top);
+	gtk_widget_set_tooltip_text(collections_on_top, _("Open collections window on top"));
+
+	hide_window_in_fullscreen = pref_checkbox_new_int(group, _("Hide window in fullscreen"),
+				options->hide_window_in_fullscreen, &c_options->hide_window_in_fullscreen);
+	gtk_widget_set_tooltip_text(hide_window_in_fullscreen, _("When alt-tabbing, prevent Geeqie window showing twice"));
+
+	hide_osd_in_fullscreen = pref_checkbox_new_int(group, _("Hide OSD in fullscreen"),
+				options->hide_osd_in_fullscreen, &c_options->hide_osd_in_fullscreen);
+	gtk_widget_set_tooltip_text(hide_osd_in_fullscreen, _("Hide Overlay Screen Display in fullscreen mode"));
+
+	pref_spin_new_int(group, _("Recent folder list maximum size"), nullptr,
+			  1, 50, 1, options->open_recent_list_maxsize, &c_options->open_recent_list_maxsize);
+
+	tmp = pref_spin_new_int(group, _("Recent folder-image list maximum size"), nullptr, 0, 50, 1, options->recent_folder_image_list_maxsize, &c_options->recent_folder_image_list_maxsize);
+	gtk_widget_set_tooltip_text(tmp, _("List of the last image viewed in each recent folder.\nRe-opening a folder will set focus to the last image viewed."));
+
+	pref_spin_new_int(group, _("Drag'n drop icon size"), nullptr,
+			  16, 256, 16, options->dnd_icon_size, &c_options->dnd_icon_size);
+
+	table = pref_table_new(group, 2, 1, FALSE, FALSE);
+	add_dnd_default_action_selection_menu(table, 0, 0, _("Drag`n drop default action:"), options->dnd_default_action, &c_options->dnd_default_action);
+
+	table = pref_table_new(group, 2, 1, FALSE, FALSE);
+	add_clipboard_selection_menu(table, 0, 0, _("Copy path clipboard selection:"), options->clipboard_selection, &c_options->clipboard_selection);
+
+	pref_spacer(group, PREF_PAD_GROUP);
+
+	group = pref_group_new(vbox, FALSE, _("Navigation"), GTK_ORIENTATION_VERTICAL);
+
+	pref_checkbox_new_int(group, _("Progressive keyboard scrolling"),
+			      options->progressive_key_scrolling, &c_options->progressive_key_scrolling);
+	pref_spin_new_int(group, _("Keyboard scrolling step multiplier:"), nullptr,
+			  1, 32, 1, options->keyboard_scroll_step, reinterpret_cast<int *>(&c_options->keyboard_scroll_step));
+	pref_checkbox_new_int(group, _("Mouse wheel scrolls image"),
+			      options->mousewheel_scrolls, &c_options->mousewheel_scrolls);
+	pref_checkbox_new_int(group, _("Navigation by left or middle click on image"),
+			      options->image_lm_click_nav, &c_options->image_lm_click_nav);
+	pref_checkbox_new_int(group, _("Open archive by left click on image"),
+			      options->image_l_click_archive, &c_options->image_l_click_archive);
+	pref_checkbox_new_int(group, _("Play video by left click on image"),
+			      options->image_l_click_video, &c_options->image_l_click_video);
+	table = pref_table_new(group, 2, 1, FALSE, FALSE);
+	add_video_menu(table, 0, 0, _("Play with:"), options->image_l_click_video_editor, &c_options->image_l_click_video_editor);
+
+	table = pref_table_new(group, 2, 1, FALSE, FALSE);
+	table = pref_table_new(group, 2, 1, FALSE, FALSE);
+	add_mouse_selection_menu(table, 0, 0, _("Mouse button Back:"), options->mouse_button_8, &c_options->mouse_button_8);
+	table = pref_table_new(group, 2, 1, FALSE, FALSE);
+	add_mouse_selection_menu(table, 0, 0, _("Mouse button Forward:"), options->mouse_button_9, &c_options->mouse_button_9);
+
+	pref_spacer(group, PREF_PAD_GROUP);
+
+	group = pref_group_new(vbox, FALSE, _("GPU"), GTK_ORIENTATION_VERTICAL);
+
+	checkbox = pref_checkbox_new_int(group, _("Override disable GPU"),
+				options->override_disable_gpu, &c_options->override_disable_gpu);
+	gtk_widget_set_tooltip_text(checkbox, _("Contact the developers for usage"));
+
+#ifdef DEBUG
+	pref_spacer(group, PREF_PAD_GROUP);
+
+	group = pref_group_new(vbox, FALSE, _("Debugging"), GTK_ORIENTATION_VERTICAL);
+
+	pref_spin_new_int(group, _("Debug level:"), nullptr,
+			  DEBUG_LEVEL_MIN, DEBUG_LEVEL_MAX, 1, get_debug_level(), &debug_c);
+
+	pref_checkbox_new_int(group, _("Timer data"),
+			options->log_window.timer_data, &c_options->log_window.timer_data);
+
+	pref_spin_new_int(group, _("Log Window max. lines:"), nullptr,
+			  1, 99999, 1, options->log_window_lines, &options->log_window_lines);
+
+	hbox = pref_box_new(group, FALSE, GTK_ORIENTATION_HORIZONTAL, PREF_PAD_SPACE);
+	pref_label_new(hbox, _("Log Window F1 command: "));
+	log_window_f1_entry = gtk_entry_new();
+	gq_gtk_entry_set_text(GTK_ENTRY(log_window_f1_entry), options->log_window.action);
+	gq_gtk_box_pack_start(GTK_BOX(hbox), log_window_f1_entry, FALSE, FALSE, 0);
+	gtk_entry_set_width_chars(GTK_ENTRY(log_window_f1_entry), 15);
+	gtk_widget_show(log_window_f1_entry);
+#endif
+}
+
+/* accelerators tab */
+
+static gboolean accel_search_function_cb(GtkTreeModel *model, gint column, const gchar *key, GtkTreeIter *iter, gpointer)
+{
+	g_autofree gchar *text = nullptr;
+	gtk_tree_model_get(model, iter, column, &text, -1);
+
+	g_autofree gchar *text_nocase = g_utf8_casefold(text, -1);
+	g_autofree gchar *key_nocase = g_utf8_casefold(key, -1);
+
+	return g_strstr_len(text_nocase, -1, key_nocase) == nullptr;
+}
+
+static void accel_row_activated_cb(GtkTreeView *tree_view, GtkTreePath *, GtkTreeViewColumn *column, gpointer)
+{
+	GList *list;
+	gint col_num = 0;
+
+	list = gtk_tree_view_get_columns(tree_view);
+	col_num = g_list_index(list, column);
+
+	g_list_free(list);
+
+	gtk_tree_view_set_search_column(tree_view, col_num);
+}
+
+static void config_tab_accelerators(GtkWidget *notebook)
+{
+	GtkWidget *hbox;
+	GtkWidget *vbox;
+	GtkWidget *group;
+	GtkWidget *button;
+	GtkWidget *scrolled;
+	GtkWidget *accel_view;
+	GtkCellRenderer *renderer;
+	GtkTreeSelection *selection;
+	GtkTreeViewColumn *column;
+
+	vbox = scrolled_notebook_page(notebook, _("Keyboard"));
+
+	group = pref_group_new(vbox, TRUE, _("Accelerators"), GTK_ORIENTATION_VERTICAL);
+
+	scrolled = gq_gtk_scrolled_window_new(nullptr, nullptr);
+	gq_gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_IN);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_ALWAYS);
+	gq_gtk_box_pack_start(GTK_BOX(group), scrolled, TRUE, TRUE, 0);
+	gtk_widget_show(scrolled);
+
+	accel_store = gtk_tree_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+
+	accel_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(accel_store));
+	g_object_unref(accel_store);
+	selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(accel_view));
+	gtk_tree_selection_set_mode(GTK_TREE_SELECTION(selection), GTK_SELECTION_MULTIPLE);
+
+	gtk_tree_view_set_enable_search(GTK_TREE_VIEW(accel_view), FALSE);
+
+	renderer = gtk_cell_renderer_text_new();
+
+	column = gtk_tree_view_column_new_with_attributes(_("Action"),
+							  renderer,
+							  "text", AE_ACTION,
+							  NULL);
+
+	gtk_tree_view_column_set_sort_column_id(column, AE_ACTION);
+	gtk_tree_view_column_set_resizable(column, TRUE);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(accel_view), column);
+
+
+	renderer = gtk_cell_renderer_accel_new();
+	g_signal_connect(G_OBJECT(renderer), "accel-cleared",
+			 G_CALLBACK(accel_store_cleared_cb), accel_store);
+	g_signal_connect(G_OBJECT(renderer), "accel-edited",
+			 G_CALLBACK(accel_store_edited_cb), accel_store);
+
+
+	g_object_set (renderer,
+		      "editable", TRUE,
+		      "accel-mode", GTK_CELL_RENDERER_ACCEL_MODE_OTHER,
+		      NULL);
+
+	column = gtk_tree_view_column_new_with_attributes(_("KEY"),
+							  renderer,
+							  "text", AE_KEY,
+							  NULL);
+
+	gtk_tree_view_column_set_sort_column_id(column, AE_KEY);
+	gtk_tree_view_column_set_resizable(column, TRUE);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(accel_view), column);
+
+	renderer = gtk_cell_renderer_text_new();
+
+	column = gtk_tree_view_column_new_with_attributes(_("Tooltip"),
+							  renderer,
+							  "text", AE_TOOLTIP,
+							  NULL);
+
+	gtk_tree_view_column_set_sort_column_id(column, AE_TOOLTIP);
+	gtk_tree_view_column_set_resizable(column, TRUE);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(accel_view), column);
+
+	renderer = gtk_cell_renderer_text_new();
+
+	column = gtk_tree_view_column_new_with_attributes("Accel",
+							  renderer,
+							  "text", AE_ACCEL,
+							  NULL);
+
+	gtk_tree_view_column_set_sort_column_id(column, AE_ACCEL);
+	gtk_tree_view_column_set_resizable(column, TRUE);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(accel_view), column);
+
+	column = gtk_tree_view_column_new_with_attributes("Icon",
+							  renderer,
+							  "text", AE_ICON,
+							  NULL);
+
+	gtk_tree_view_column_set_sort_column_id(column, AE_ICON);
+	gtk_tree_view_column_set_resizable(column, TRUE);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(accel_view), column);
+
+	/* Search on text in column */
+	gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(accel_view), TRUE);
+	g_signal_connect(accel_view, "row_activated", G_CALLBACK(accel_row_activated_cb), accel_store);
+	gtk_tree_view_set_enable_search(GTK_TREE_VIEW(accel_view), TRUE);
+	gtk_tree_view_set_search_column(GTK_TREE_VIEW(accel_view), AE_TOOLTIP);
+	gtk_tree_view_set_search_equal_func(GTK_TREE_VIEW(accel_view), accel_search_function_cb, nullptr, nullptr);
+
+	accel_store_populate();
+	gq_gtk_container_add(GTK_WIDGET(scrolled), accel_view);
+	gtk_widget_show(accel_view);
+
+	hbox = pref_box_new(group, FALSE, GTK_ORIENTATION_HORIZONTAL, PREF_PAD_BUTTON_GAP);
+
+	button = pref_button_new(nullptr, nullptr, _("Defaults"),
+				 G_CALLBACK(accel_default_cb), accel_view);
+	gq_gtk_box_pack_end(GTK_BOX(hbox), button, FALSE, FALSE, 0);
+	gtk_widget_show(button);
+
+	button = pref_button_new(nullptr, nullptr, _("Reset selected"),
+				 G_CALLBACK(accel_reset_cb), accel_view);
+	gtk_widget_set_tooltip_text(button, _("Will only reset changes made before the settings are saved"));
+	gq_gtk_box_pack_end(GTK_BOX(hbox), button, FALSE, FALSE, 0);
+	gtk_widget_show(button);
+
+	button = pref_button_new(nullptr, nullptr, _("Clear selected"),
+				 G_CALLBACK(accel_clear_cb), accel_view);
+	gq_gtk_box_pack_end(GTK_BOX(hbox), button, FALSE, FALSE, 0);
+	gtk_widget_show(button);
+}
+
+/* toolbar main tab */
+static void config_tab_toolbar_main(GtkWidget *notebook)
+{
+	GtkWidget *vbox;
+	GtkWidget *toolbardata;
+	LayoutWindow *lw;
+
+	lw = static_cast<LayoutWindow *>(layout_window_list->data);
+
+	vbox = scrolled_notebook_page(notebook, _("Toolbar Main"));
+
+	toolbardata = toolbar_select_new(lw, TOOLBAR_MAIN);
+	gq_gtk_box_pack_start(GTK_BOX(vbox), toolbardata, TRUE, TRUE, 0);
+	gtk_widget_show(vbox);
+}
+
+/* toolbar status tab */
+static void config_tab_toolbar_status(GtkWidget *notebook)
+{
+	GtkWidget *vbox;
+	GtkWidget *toolbardata;
+	LayoutWindow *lw;
+
+	lw = static_cast<LayoutWindow *>(layout_window_list->data);
+
+	vbox = scrolled_notebook_page(notebook, _("Toolbar Status"));
+
+	toolbardata = toolbar_select_new(lw, TOOLBAR_STATUS);
+	gq_gtk_box_pack_start(GTK_BOX(vbox), toolbardata, TRUE, TRUE, 0);
+	gtk_widget_show(vbox);
+}
+
+/* advanced tab */
+static void config_tab_advanced(GtkWidget *notebook)
+{
+	GList *extensions_list = nullptr;
+	GtkWidget *alternate_checkbox;
+	GtkWidget *dupes_threads_spin;
+	GtkWidget *group;
+	GtkWidget *subgroup;
+	GtkWidget *tabcomp;
+	GtkWidget *threads_string_label;
+	GtkWidget *types_string_label;
+	GtkWidget *vbox;
+
+	vbox = scrolled_notebook_page(notebook, _("Advanced"));
+	group = pref_group_new(vbox, FALSE, _("External preview extraction"), GTK_ORIENTATION_VERTICAL);
+
+	pref_checkbox_new_int(group, _("Use external preview extraction -  Requires restart"), options->external_preview.enable, &c_options->external_preview.enable);
+
+	pref_spacer(group, PREF_PAD_GROUP);
+
+	pixbuf_gdk_known_extensions(&extensions_list);
+
+	 g_autoptr(GString) types_string = g_string_new(nullptr);
+
+	for (GList *work = extensions_list; work; work = work->next)
+		{
+		if (types_string->len > 0)
+			{
+			types_string = g_string_append(types_string, ", ");
+			}
+		types_string = g_string_append(types_string, static_cast<gchar *>(work->data));
+		}
+	g_list_free_full(extensions_list, g_free);
+
+	types_string = g_string_prepend(types_string, _("Usable file types:\n"));
+	types_string_label = pref_label_new(group, types_string->str);
+	gtk_label_set_line_wrap(GTK_LABEL(types_string_label), TRUE);
+
+	pref_spacer(group, PREF_PAD_GROUP);
+
+	group = pref_group_new(vbox, FALSE, _("File identification tool"), GTK_ORIENTATION_VERTICAL);
+	external_preview_select_entry = gtk_entry_new();
+	tabcomp = tab_completion_new(&external_preview_select_entry, options->external_preview.select, nullptr, nullptr, nullptr, nullptr);
+	tab_completion_add_select_button(external_preview_select_entry, _("Select file identification tool"), FALSE);
+	gq_gtk_box_pack_start(GTK_BOX(group), tabcomp, TRUE, TRUE, 0);
+	gtk_widget_show(tabcomp);
+
+	group = pref_group_new(vbox, FALSE, _("Preview extraction tool"), GTK_ORIENTATION_VERTICAL);
+	external_preview_extract_entry = gtk_entry_new();
+	tabcomp = tab_completion_new(&external_preview_extract_entry, options->external_preview.extract, nullptr, nullptr, nullptr, nullptr);
+	tab_completion_add_select_button(external_preview_extract_entry, _("Select preview extraction tool"), FALSE);
+	gq_gtk_box_pack_start(GTK_BOX(group), tabcomp, TRUE, TRUE, 0);
+	gtk_widget_show(tabcomp);
+
+	gtk_widget_show(vbox);
+
+	pref_spacer(group, PREF_PAD_GROUP);
+
+	pref_line(vbox, PREF_PAD_SPACE);
+	group = pref_group_new(vbox, FALSE, _("Thread pool limits"), GTK_ORIENTATION_VERTICAL);
+
+	threads_string_label = pref_label_new(group, _("This option limits the number of threads (or cpu cores) that Geeqie will use when running duplicate checks.\nThe value 0 means all available cores will be used."));
+	gtk_label_set_line_wrap(GTK_LABEL(threads_string_label), TRUE);
+
+	pref_spacer(vbox, PREF_PAD_GROUP);
+
+	dupes_threads_spin = pref_spin_new_int(vbox, _("Duplicate check:"), _("max. threads"), 0, get_cpu_cores(), 1, options->threads.duplicates, &c_options->threads.duplicates);
+	gtk_widget_set_tooltip_markup(dupes_threads_spin, _("Set to 0 for unlimited"));
+
+	pref_spacer(group, PREF_PAD_GROUP);
+
+	pref_line(vbox, PREF_PAD_SPACE);
+
+	group = pref_group_new(vbox, FALSE, _("Alternate similarity alogorithm"), GTK_ORIENTATION_VERTICAL);
+
+	alternate_checkbox = pref_checkbox_new_int(group, _("Enable alternate similarity algorithm"), options->alternate_similarity_algorithm.enabled, &c_options->alternate_similarity_algorithm.enabled);
+
+	subgroup = pref_box_new(group, FALSE, GTK_ORIENTATION_VERTICAL, PREF_PAD_GAP);
+	pref_checkbox_link_sensitivity(alternate_checkbox, subgroup);
+
+	alternate_checkbox = pref_checkbox_new_int(subgroup, _("Use grayscale"), options->alternate_similarity_algorithm.grayscale, &c_options->alternate_similarity_algorithm.grayscale);
+	gtk_widget_set_tooltip_text(alternate_checkbox, _("Reduce fingerprint to grayscale"));
+}
+
+/* stereo tab */
+static void config_tab_stereo(GtkWidget *notebook)
+{
+	GtkWidget *vbox;
+	GtkWidget *group;
+	GtkWidget *group2;
+	GtkWidget *table;
+	GtkWidget *box;
+	GtkWidget *box2;
+	GtkWidget *fs_button;
+	vbox = scrolled_notebook_page(notebook, _("Stereo"));
+
+	group = pref_group_new(vbox, FALSE, _("Windowed stereo mode"), GTK_ORIENTATION_VERTICAL);
+
+	table = pref_table_new(group, 2, 1, FALSE, FALSE);
+	add_stereo_mode_menu(table, 0, 0, _("Windowed stereo mode"), options->stereo.mode, &c_options->stereo.mode, FALSE);
+
+	table = pref_table_new(group, 2, 2, TRUE, FALSE);
+	box = pref_table_box(table, 0, 0, GTK_ORIENTATION_HORIZONTAL, nullptr);
+	pref_checkbox_new_int(box, _("Mirror left image"),
+			      options->stereo.mode & PR_STEREO_MIRROR_LEFT, &c_options->stereo.tmp.mirror_left);
+	box = pref_table_box(table, 1, 0, GTK_ORIENTATION_HORIZONTAL, nullptr);
+	pref_checkbox_new_int(box, _("Flip left image"),
+			      options->stereo.mode & PR_STEREO_FLIP_LEFT, &c_options->stereo.tmp.flip_left);
+	box = pref_table_box(table, 0, 1, GTK_ORIENTATION_HORIZONTAL, nullptr);
+	pref_checkbox_new_int(box, _("Mirror right image"),
+			      options->stereo.mode & PR_STEREO_MIRROR_RIGHT, &c_options->stereo.tmp.mirror_right);
+	box = pref_table_box(table, 1, 1, GTK_ORIENTATION_HORIZONTAL, nullptr);
+	pref_checkbox_new_int(box, _("Flip right image"),
+			      options->stereo.mode & PR_STEREO_FLIP_RIGHT, &c_options->stereo.tmp.flip_right);
+	pref_checkbox_new_int(group, _("Swap left and right images"),
+			      options->stereo.mode & PR_STEREO_SWAP, &c_options->stereo.tmp.swap);
+	pref_checkbox_new_int(group, _("Disable stereo mode on single image source"),
+			      options->stereo.mode & PR_STEREO_TEMP_DISABLE, &c_options->stereo.tmp.temp_disable);
+
+	group = pref_group_new(vbox, FALSE, _("Fullscreen stereo mode"), GTK_ORIENTATION_VERTICAL);
+	fs_button = pref_checkbox_new_int(group, _("Use different settings for fullscreen"),
+			      options->stereo.enable_fsmode, &c_options->stereo.enable_fsmode);
+	box2 = pref_box_new(group, FALSE, GTK_ORIENTATION_VERTICAL, PREF_PAD_SPACE);
+	pref_checkbox_link_sensitivity(fs_button, box2);
+	table = pref_table_new(box2, 2, 1, FALSE, FALSE);
+	add_stereo_mode_menu(table, 0, 0, _("Fullscreen stereo mode"), options->stereo.fsmode, &c_options->stereo.fsmode, TRUE);
+	table = pref_table_new(box2, 2, 2, TRUE, FALSE);
+	box = pref_table_box(table, 0, 0, GTK_ORIENTATION_HORIZONTAL, nullptr);
+	pref_checkbox_new_int(box, _("Mirror left image"),
+			      options->stereo.fsmode & PR_STEREO_MIRROR_LEFT, &c_options->stereo.tmp.fs_mirror_left);
+	box = pref_table_box(table, 1, 0, GTK_ORIENTATION_HORIZONTAL, nullptr);
+	pref_checkbox_new_int(box, _("Flip left image"),
+			      options->stereo.fsmode & PR_STEREO_FLIP_LEFT, &c_options->stereo.tmp.fs_flip_left);
+	box = pref_table_box(table, 0, 1, GTK_ORIENTATION_HORIZONTAL, nullptr);
+	pref_checkbox_new_int(box, _("Mirror right image"),
+			      options->stereo.fsmode & PR_STEREO_MIRROR_RIGHT, &c_options->stereo.tmp.fs_mirror_right);
+	box = pref_table_box(table, 1, 1, GTK_ORIENTATION_HORIZONTAL, nullptr);
+	pref_checkbox_new_int(box, _("Flip right image"),
+			      options->stereo.fsmode & PR_STEREO_FLIP_RIGHT, &c_options->stereo.tmp.fs_flip_right);
+	pref_checkbox_new_int(box2, _("Swap left and right images"),
+			      options->stereo.fsmode & PR_STEREO_SWAP, &c_options->stereo.tmp.fs_swap);
+	pref_checkbox_new_int(box2, _("Disable stereo mode on single image source"),
+			      options->stereo.fsmode & PR_STEREO_TEMP_DISABLE, &c_options->stereo.tmp.fs_temp_disable);
+
+	group2 = pref_group_new(box2, FALSE, _("Fixed position"), GTK_ORIENTATION_VERTICAL);
+	table = pref_table_new(group2, 5, 3, FALSE, FALSE);
+	pref_table_spin_new_int(table, 0, 0, _("Width"), nullptr,
+			  1, 5000, 1, options->stereo.fixed_w, &c_options->stereo.fixed_w);
+	pref_table_spin_new_int(table, 3, 0,  _("Height"), nullptr,
+			  1, 5000, 1, options->stereo.fixed_h, &c_options->stereo.fixed_h);
+	pref_table_spin_new_int(table, 0, 1,  _("Left X"), nullptr,
+			  0, 5000, 1, options->stereo.fixed_x1, &c_options->stereo.fixed_x1);
+	pref_table_spin_new_int(table, 3, 1,  _("Left Y"), nullptr,
+			  0, 5000, 1, options->stereo.fixed_y1, &c_options->stereo.fixed_y1);
+	pref_table_spin_new_int(table, 0, 2,  _("Right X"), nullptr,
+			  0, 5000, 1, options->stereo.fixed_x2, &c_options->stereo.fixed_x2);
+	pref_table_spin_new_int(table, 3, 2,  _("Right Y"), nullptr,
+			  0, 5000, 1, options->stereo.fixed_y2, &c_options->stereo.fixed_y2);
+
+}
+
+/* Main preferences window */
+static void config_window_create(LayoutWindow *lw)
+{
+	GtkWidget *win_vbox;
+	GtkWidget *hbox;
+	GtkWidget *notebook;
+	GtkWidget *button;
+	GtkWidget *ct_button;
+
+	if (!c_options) c_options = init_options(nullptr);
+
+	configwindow = window_new("preferences", PIXBUF_INLINE_ICON_CONFIG, nullptr, _("Preferences"));
+	DEBUG_NAME(configwindow);
+	gtk_window_set_type_hint(GTK_WINDOW(configwindow), GDK_WINDOW_TYPE_HINT_DIALOG);
+	g_signal_connect(G_OBJECT(configwindow), "delete_event",
+			 G_CALLBACK(config_window_delete), NULL);
+	if (options->save_dialog_window_positions)
+		{
+		gtk_window_resize(GTK_WINDOW(configwindow), lw->options.preferences_window.rect.width, lw->options.preferences_window.rect.height);
+		gq_gtk_window_move(GTK_WINDOW(configwindow), lw->options.preferences_window.rect.x, lw->options.preferences_window.rect.y);
+		}
+	else
+		{
+		gtk_window_set_default_size(GTK_WINDOW(configwindow), CONFIG_WINDOW_DEF_WIDTH, CONFIG_WINDOW_DEF_HEIGHT);
